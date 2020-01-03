@@ -92,16 +92,22 @@ class KotlinCodeBlockModificationListener(
                 val changedElements = changeSet.changedElements
 
                 // skip change if it contains only virtual/fake change
-                if (changedElements.isNotEmpty() &&
+                if (changedElements.isNotEmpty()) {
                     // ignore formatting (whitespaces etc)
-                    (isFormattingChange(changeSet) ||
-                            isCommentChange(changeSet) ||
-                            changedElements.all { !it.psi.isPhysical })
-                ) return
+                    if (isFormattingChange(changeSet) || isCommentChange(changeSet)) return
 
-                val inBlockChange = inBlockModifications(changedElements)
+                    if (changedElements.all { !it.psi.isPhysical }) {
+                        if (inBlockModifications(changedElements, false).isEmpty()) {
+                            incNonPhysicalOutOfBlockModificationCount(ktFile)
+                        }
+                        return
+                    }
+                }
 
-                if (!inBlockChange) {
+                val inBlockElements = inBlockModifications(changedElements)
+                inBlockElements.forEach { it.containingKtFile.addInBlockModifiedItem(it) }
+
+                if (inBlockElements.isEmpty()) {
                     messageBusConnection.deliverImmediately()
 
                     if (ktFile.isPhysical && !isReplLine(ktFile.virtualFile)) {
@@ -164,11 +170,19 @@ class KotlinCodeBlockModificationListener(
             return file.getUserData(KOTLIN_CONSOLE_KEY) == true
         }
 
-        private fun incOutOfBlockModificationCount(file: KtFile) {
+        private fun incOutOfBlockModificationCount(file: KtFile, key: Key<Long>) {
             file.clearInBlockModifications()
 
-            val count = file.getUserData(FILE_OUT_OF_BLOCK_MODIFICATION_COUNT) ?: 0
-            file.putUserData(FILE_OUT_OF_BLOCK_MODIFICATION_COUNT, count + 1)
+            val count = file.getUserData(key) ?: 0
+            file.putUserData(key, count + 1)
+        }
+
+        private fun incOutOfBlockModificationCount(file: KtFile) {
+            incOutOfBlockModificationCount(file, FILE_OUT_OF_BLOCK_MODIFICATION_COUNT)
+        }
+
+        private fun incNonPhysicalOutOfBlockModificationCount(file: KtFile) {
+            incOutOfBlockModificationCount(file, NON_PHYSICAL_FILE_OUT_OF_BLOCK_MODIFICATION_COUNT)
         }
 
         private fun incFileModificationCount(file: KtFile) {
@@ -177,24 +191,18 @@ class KotlinCodeBlockModificationListener(
             tracker.incModificationCount()
         }
 
-        private fun inBlockModifications(elements: Array<ASTNode>): Boolean {
+        private fun inBlockModifications(elements: Array<ASTNode>, skipNonPhysical: Boolean = true): List<KtElement> {
             // When a code fragment is reparsed, Intellij doesn't do an AST diff and considers the entire
             // contents to be replaced, which is represented in a POM event as an empty list of changed elements
-            if (elements.isEmpty()) return false
 
-            val inBlockElements = mutableSetOf<KtElement>()
-            for (element in elements) {
+            return elements.mapNotNull { element ->
                 // skip fake PSI elements like `IntellijIdeaRulezzz$`
                 val psi = element.psi
-                if (!psi.isPhysical) continue
+                if (!psi.isPhysical && skipNonPhysical) return@mapNotNull null
 
-                val modificationScope = getInsideCodeBlockModificationScope(psi) ?: return false
-
-                inBlockElements.add(modificationScope.blockDeclaration)
+                val modificationScope = getInsideCodeBlockModificationScope(psi) ?: return emptyList()
+                modificationScope.blockDeclaration
             }
-
-            inBlockElements.forEach { it.containingKtFile.addInBlockModifiedItem(it) }
-            return inBlockElements.isNotEmpty()
         }
 
         private fun isCommentChange(changeSet: TreeChangeEvent): Boolean =
@@ -347,6 +355,9 @@ private val FILE_OUT_OF_BLOCK_MODIFICATION_COUNT = Key<Long>("FILE_OUT_OF_BLOCK_
 
 val KtFile.outOfBlockModificationCount: Long by NotNullableUserDataProperty(FILE_OUT_OF_BLOCK_MODIFICATION_COUNT, 0)
 
+private val NON_PHYSICAL_FILE_OUT_OF_BLOCK_MODIFICATION_COUNT = Key<Long>("NON_PHYSICAL_FILE_OUT_OF_BLOCK_MODIFICATION_COUNT")
+
+val KtFile.outOfBlockNonPhysicalModificationCount: Long by NotNullableUserDataProperty(NON_PHYSICAL_FILE_OUT_OF_BLOCK_MODIFICATION_COUNT, 0)
 
 /**
  * inBlockModifications is a collection of block elements those have in-block modifications
